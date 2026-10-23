@@ -1,0 +1,25 @@
+node_modules/
+dist/
+.expo/
+android/
+ios/
+src-tauri/target/
+dist-installers/
+win-unpacked/
+*.apk
+*.aab
+*.ipa
+hotdrop-uploads/
+.DS_Store
+.env
+
+# Original application and local reference files; the rebuild is in New HotDrop Apps/.
+/apps/
+/packages/
+/package.json
+/package-lock.json
+/.easignore
+/HOTDROP-FULL-SPEC.md
+/README-local-backup-*.md
+/publish-hotdrop.ps1
+/qr.png
