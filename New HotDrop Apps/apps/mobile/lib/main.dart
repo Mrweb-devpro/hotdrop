@@ -25,7 +25,9 @@ class HotDropApp extends StatelessWidget {
 }
 
 class HostScreen extends StatefulWidget {
-  const HostScreen({super.key});
+  const HostScreen({super.key, this.createHost, this.keepAwake});
+  final Future<HostServer> Function()? createHost;
+  final Future<void> Function(bool enabled)? keepAwake;
   @override
   State<HostScreen> createState() => _HostScreenState();
 }
@@ -35,6 +37,7 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
   Timer? refresh;
   Timer? copiedTimer;
   bool starting = false;
+  bool checking = false;
   bool copied = false;
   List<String> ips = [];
   String? selected;
@@ -47,60 +50,78 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     unawaited(_start());
-    refresh = Timer.periodic(const Duration(seconds: 3), (_) {
-      if (host?.running != true) { unawaited(_start()); }
-      else { unawaited(_addresses()); }
-    });
+    refresh = Timer.periodic(const Duration(seconds: 3), (_) { unawaited(_refresh()); });
     // Keep the host visible and awake; background execution is not promised.
-    unawaited(WakelockPlus.enable().catchError((Object _) {}));
+    unawaited(_keepAwake(true));
+  }
+
+  Future<void> _keepAwake(bool enabled) async {
+    try {
+      if (widget.keepAwake != null) { await widget.keepAwake!(enabled); }
+      else { await WakelockPlus.toggle(enable: enabled); }
+    } catch (_) { /* screen wake lock failure must not prevent hosting */ }
+  }
+
+  Future<void> _refresh() async {
+    if (!mounted || starting || checking) return;
+    if (host?.running != true) { await _start(); return; }
+    checking = true;
+    try {
+      await host!.checkReady();
+      await _addresses();
+    } catch (_) {
+      await host?.stop();
+      await _start();
+    } finally { checking = false; }
   }
 
   Future<void> _addresses() async {
     try {
-      final addresses = await host!.addresses();
-      if (!mounted) return;
+      final addresses = (await host!.addresses()).toSet().toList();
+      if (!mounted || host?.running != true) return;
       setState(() {
         ips = addresses;
         if (!ips.contains(selected)) selected = ips.isEmpty ? null : ips.first;
         url = selected == null ? null : 'http://$selected:${host!.port}';
       });
-    } catch (_) { /* retain last known address until the next refresh */ }
+    } catch (_) {
+      if (mounted) setState(() { ips = []; selected = null; url = null; });
+    }
+  }
+
+  Future<HostServer> _createHost() async {
+    if (widget.createHost != null) return widget.createHost!();
+    final temp = await getTemporaryDirectory();
+    return HostServer(Directory('${temp.path}/hotdrop-uploads'), (path) async {
+      final data = await rootBundle.load(path);
+      return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+    });
   }
 
   Future<void> _start() async {
-    if (starting || host?.running == true) return;
+    if (!mounted || starting || host?.running == true) return;
     starting = true;
     try {
-      final temp = await getTemporaryDirectory();
-      if (!mounted) return;
-      host ??= HostServer(Directory('${temp.path}/hotdrop-uploads'), (path) async {
-        final data = await rootBundle.load(path);
-        return data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
-      });
-      await host!.start();
+      final candidate = host ?? await _createHost();
+      if (!mounted) { await candidate.stop(); return; }
+      host = candidate;
+      await host!.start(allowPortFallback: true);
       if (!mounted) { await host!.stop(); return; }
-      // Verify that startup means an HTTP response, rather than only a bound socket.
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 3);
-      try {
-        final request = await client.getUrl(Uri.parse('http://127.0.0.1:${host!.port}/api/info'));
-        final response = await request.close().timeout(const Duration(seconds: 5));
-        await response.drain<void>();
-        if (response.statusCode != 200) throw const HttpException('Self-check failed');
-      } finally { client.close(force: true); }
+      await host!.checkReady();
       if (!mounted) return;
       setState(() { status = 'Sharing is ON · Auto-started'; failure = null; });
       await _addresses();
     } catch (e) {
       await host?.stop();
-      if (mounted) setState(() { status = 'Could not start sharing'; failure = '$e'; });
+      if (mounted) setState(() { status = 'Could not start sharing'; failure = '$e'; url = null; });
     } finally { starting = false; }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
-      unawaited(_start());
-      if (host?.running == true) unawaited(_addresses());
+      unawaited(_keepAwake(true));
+      unawaited(_refresh());
     }
   }
 
@@ -110,7 +131,7 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
     refresh?.cancel();
     copiedTimer?.cancel();
     unawaited(host?.stop() ?? Future<void>.value());
-    unawaited(WakelockPlus.disable());
+    unawaited(_keepAwake(false));
     super.dispose();
   }
 
@@ -145,7 +166,7 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
         Text(status, style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 17)),
         if (failure != null) ...[
           const SizedBox(height: 12), Text(failure!, style: const TextStyle(color: Colors.red)),
-          const Text('Retrying automatically. Close any other HotDrop host using port 8080.'),
+          const Text('Retrying automatically. Check that storage is available and reopen HotDrop if needed.'),
         ],
         if (host?.running == true && url == null) const Padding(padding: EdgeInsets.only(top: 16),
           child: Text('Server ready. Connect to WiFi or turn on your hotspot to get a sharing address.')),
@@ -155,7 +176,7 @@ class _HostScreenState extends State<HostScreen> with WidgetsBindingObserver {
           Center(child: SelectableText(url!, style: const TextStyle(fontWeight: FontWeight.bold))),
           if (ips.length > 1) DropdownButton<String>(value: selected, isExpanded: true,
             items: ips.map((ip) => DropdownMenuItem(value: ip, child: Text(ip))).toList(),
-            onChanged: (ip) => setState(() { selected = ip; url = 'http://$ip:${host!.port}'; })),
+            onChanged: (ip) { if (ip != null) setState(() { selected = ip; url = 'http://$ip:${host!.port}'; }); }),
           const SizedBox(height: 12),
           Wrap(spacing: 8, children: [
             FilledButton(onPressed: () async {

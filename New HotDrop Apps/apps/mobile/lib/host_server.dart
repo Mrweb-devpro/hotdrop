@@ -8,10 +8,12 @@ import 'package:mime/mime.dart';
 typedef AssetLoader = Future<Uint8List> Function(String path);
 
 class HostServer {
-  HostServer(this.directory, this.loadAsset);
+  HostServer(this.directory, this.loadAsset, {this.maxUploadBytes = maxFileBytes});
   final Directory directory;
   final AssetLoader loadAsset;
+  final int maxUploadBytes;
   HttpServer? _server;
+  Future<void>? _starting;
   final List<Map<String, dynamic>> files = [];
   final List<Map<String, dynamic>> texts = [];
   final Map<String, Map<String, dynamic>> _peers = {};
@@ -32,17 +34,51 @@ class HostServer {
     };
   }
 
-  Future<void> start({int port = 8080}) async {
-    if (running) return;
+  Future<void> start({int port = 8080, bool allowPortFallback = false}) {
+    if (running) return Future<void>.value();
+    return _starting ??= _bind(port, allowPortFallback).whenComplete(() { _starting = null; });
+  }
+
+  Future<void> _bind(int port, bool allowPortFallback) async {
+    // A listening socket is not useful if the bundled sharing page is missing.
+    await loadAsset('assets/web/index.html');
     await directory.create(recursive: true);
-    _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
-    _server!.listen((request) { unawaited(_handle(request)); });
+    HttpServer server;
+    try {
+      server = await HttpServer.bind(InternetAddress.anyIPv4, port);
+    } on SocketException {
+      if (!allowPortFallback || port == 0) rethrow;
+      server = await HttpServer.bind(InternetAddress.anyIPv4, 0);
+    }
+    _server = server;
+    server.listen((request) { unawaited(_handle(request)); },
+      onError: (Object _) {
+        if (identical(_server, server)) _server = null;
+        unawaited(server.close(force: true));
+      },
+      onDone: () { if (identical(_server, server)) _server = null; });
   }
 
   Future<void> stop() async {
+    try { await _starting; } catch (_) { /* a failed bind needs no cleanup */ }
     final server = _server;
     _server = null;
     await server?.close(force: true);
+  }
+
+  Future<void> checkReady() async {
+    if (!running) throw const HttpException('Sharing server is not running');
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 3)
+      ..findProxy = (_) => 'DIRECT';
+    try {
+      await (() async {
+        final request = await client.getUrl(Uri.parse('http://127.0.0.1:$port/'));
+        final response = await request.close();
+        await response.drain<void>();
+        if (response.statusCode != 200) throw const HttpException('Sharing page self-check failed');
+      })().timeout(const Duration(seconds: 5));
+    } finally { client.close(force: true); }
   }
 
   Future<List<String>> addresses() async {
@@ -52,7 +88,7 @@ class HostServer {
     interfaces.sort((a, b) => _rank(a.name).compareTo(_rank(b.name)));
     for (final interface in interfaces) {
       for (final address in interface.addresses) {
-        if (!address.isLoopback) result.add(address.address);
+        if (!address.isLoopback && !result.contains(address.address)) result.add(address.address);
       }
     }
     return result;
@@ -76,10 +112,14 @@ class HostServer {
   }
 
   Future<void> _upload(HttpRequest request) async {
-    final boundary = request.headers.contentType?.parameters['boundary'];
-    if (boundary == null) throw const FormatException('Multipart boundary required');
+    final contentType = request.headers.contentType;
+    final boundary = contentType?.parameters['boundary'];
+    if (contentType?.mimeType != 'multipart/form-data' || boundary == null || boundary.isEmpty) {
+      throw const FormatException('Multipart form data and boundary required');
+    }
     final pending = <Map<String, dynamic>>[];
     final created = <File>[];
+    var published = false;
     var from = Map<String, dynamic>.of(unknown);
     try {
       await for (final part in MimeMultipartTransformer(boundary).bind(request)) {
@@ -90,22 +130,23 @@ class HostServer {
           from = peer(jsonDecode(await _readText(part, 4096)));
         } else if (field == 'files' && filename != null) {
           if (pending.length >= 20) throw const HttpException('Maximum 20 files per upload');
-          final name = filename.split(RegExp(r'[/\\]')).last;
-          final stored = '${_id()}-${name.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_')}';
+          final original = filename.split(RegExp(r'[/\\]')).last;
+          final name = original.isEmpty ? 'download' : original;
+          // Keep the original display name without exceeding filesystem name limits.
+          final stored = '${_id()}.upload';
           final file = File('${directory.path}/$stored');
           created.add(file);
-          final sink = file.openWrite();
+          final output = await file.open(mode: FileMode.write);
           var size = 0;
           try {
             await for (final chunk in part) {
               size += chunk.length;
-              if (size > maxFileBytes) throw const HttpException('Maximum file size is 1 GB');
-              sink.add(chunk);
-              // Flush applies backpressure instead of buffering the whole file.
-              await sink.flush();
+              if (size > maxUploadBytes) throw const HttpException('File exceeds the upload size limit');
+              // Await disk writes so large files never accumulate in memory.
+              await output.writeFrom(chunk);
             }
           } finally {
-            await sink.close();
+            await output.close();
           }
           pending.add({'id': _id(), 'name': name, 'size': size,
             'mime': part.headers['content-type'] ?? 'application/octet-stream',
@@ -115,24 +156,40 @@ class HostServer {
           await part.drain<void>();
         }
       }
+      if (pending.isEmpty) throw const FormatException('No files received');
       for (final item in pending) { item['from'] = from; }
       files.insertAll(0, pending);
-      if (files.length > 200) files.removeRange(200, files.length);
+      published = true;
+      if (files.length > 200) {
+        final expired = files.sublist(200);
+        files.removeRange(200, files.length);
+        for (final item in expired) {
+          final stored = Uri.parse(item['url'] as String).pathSegments.last;
+          try { await File('${directory.path}/$stored').delete(); } on FileSystemException { /* already removed */ }
+        }
+      }
       await _json(request, {'files': pending});
     } catch (_) {
-      for (final file in created) { if (await file.exists()) await file.delete(); }
+      if (!published) {
+        for (final file in created) {
+          try { if (await file.exists()) await file.delete(); } on FileSystemException { /* preserve the original error */ }
+        }
+      }
       rethrow;
     }
   }
 
   Future<void> _handle(HttpRequest request) async {
     final response = request.response;
-    response.headers.set('X-Content-Type-Options', 'nosniff');
-    response.headers.set('Cache-Control', 'no-store');
     try {
+      response.headers.set('X-Content-Type-Options', 'nosniff');
+      response.headers.set('Cache-Control', 'no-store');
       final path = request.uri.path;
       if (request.method == 'GET' && path == '/api/info') {
-        final ips = await addresses();
+        // Interface discovery can briefly fail while Android switches networks.
+        // Keep the HTTP server usable and retry discovery on the next poll.
+        List<String> ips;
+        try { ips = await addresses(); } on SocketException { ips = []; }
         final requestedHost = request.requestedUri.host;
         // Only advertise an address that belongs to this host.
         final advertisedIp = ips.contains(requestedHost)
@@ -160,7 +217,7 @@ class HostServer {
         }
         final text = body['text'] as String;
         final uri = Uri.tryParse(text.trim());
-        final item = <String, dynamic>{'id': _id(), 'text': text.substring(0, min(text.length, 5000)),
+        final item = <String, dynamic>{'id': _id(), 'text': String.fromCharCodes(text.runes.take(5000)),
           'type': uri != null && (uri.scheme == 'http' || uri.scheme == 'https') && uri.host.isNotEmpty ? 'link' : 'text',
           'from': peer(body['from']), 'at': DateTime.now().millisecondsSinceEpoch};
         texts.insert(0, item);
@@ -195,13 +252,17 @@ class HostServer {
         await _json(request, {'error': 'Not found'}, 404);
       }
     } on FormatException catch (e) {
-      await _json(request, {'error': e.message}, 400);
+      await _error(request, e.message, 400);
     } on HttpException catch (e) {
-      await _json(request, {'error': e.message}, 413);
+      await _error(request, e.message, 413);
     } catch (_) {
-      try { await _json(request, {'error': 'Request failed. Check storage and retry.'}, 500); } catch (_) { /* disconnected */ }
+      await _error(request, 'Request failed. Check storage and retry.', 500);
     } finally {
       try { await response.close(); } catch (_) { /* disconnected */ }
     }
+  }
+
+  Future<void> _error(HttpRequest request, String message, int status) async {
+    try { await _json(request, {'error': message}, status); } catch (_) { /* disconnected */ }
   }
 }

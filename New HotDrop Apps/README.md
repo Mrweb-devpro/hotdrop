@@ -8,15 +8,17 @@ This isolated rebuild leaves the original apps and the sibling `hotdrop_flutter`
 - `apps/desktop`: existing Electron shell and Express/Socket.IO host. Auto-start, QR, tray, file sharing, text sharing, layout, and window-close behavior are retained. Electron now waits for the server to listen and uses the same server module as the console host. File paths and peer input are validated. The existing Electron pin is retained.
 - `apps/mobile`: new Flutter Android app using Dart's built-in HTTP server, bound to `0.0.0.0`. No Expo, React Native bridge, handwritten HTTP parser, or local Android Studio is required for GitHub builds. The directory previously named `hotdrop_flutter` actually contains a Kotlin/NanoHTTPD project; this rebuild does not import that implementation.
 
-The Android host streams uploads and downloads, bundles the actual web client, polls the feed every two seconds, tracks guest heartbeats, verifies HTTP startup, retries startup failures, and refreshes interface addresses. It does not guess a hardcoded hotspot address. If several addresses exist, select the WiFi/hotspot address in the app. Files remain on the host; there is no internet service or account.
+The Android host streams uploads and downloads, bundles the actual web client, polls the feed every two seconds, tracks guest heartbeats, verifies the sharing page at startup, retries startup failures, and refreshes interface addresses. It starts on port 8080, automatically choosing a free port if that port is occupied; the QR/link reflects the actual port. It does not guess a hardcoded hotspot address. If several addresses exist, select the WiFi/hotspot address in the app. Files remain on the host; there is no internet service or account.
 
 ## GitHub build
 
 Commit this folder **and** the repository-root workflow. Run **HotDrop rebuilt apps** in GitHub Actions, or push changes to these paths. It produces an Android test APK and a Windows NSIS installer as downloadable artifacts. Nothing has been pushed or run on GitHub from this workspace.
 
-The Android job builds the web UI, generates the standard Flutter Android scaffold, inserts LAN/cleartext permissions, bundles web assets, runs analysis and server tests, and builds an APK. The generated template's release build uses debug signing: this is a testing artifact, not a Play Store production release. It uses a separate Android application ID (`com.hotdrop.hotdrop_mobile`) so it can be tested alongside the old app. Configure a persistent signing key before distributing updates broadly. The Windows installer is unsigned.
+The Android job builds the web UI, generates the standard Flutter Android scaffold, inserts LAN/cleartext permissions, bundles web assets, runs analysis plus server and startup-screen tests, and builds an APK. A separate **Test installed Android APK** job installs that exact release APK on an Android 15 emulator and checks auto-start, bundled JavaScript/CSS, peers, long text, binary upload/download, and resume. Its logs and screenshot are uploaded as `HotDrop-Android-smoke-results`. A physical WiFi/hotspot test is still necessary; emulator forwarding cannot verify a phone manufacturer's network and battery restrictions.
 
-The Flutter SDK uses the stable channel; the JS manifests retain the original web dependencies. An independently resolved lockfile should be committed after the first successful dependency installation. A lockfile could not be generated locally because package registry DNS is unavailable.
+The generated template's release build uses debug signing: this is a testing artifact, not a Play Store production release. It uses a separate Android application ID (`com.hotdrop.hotdrop_mobile`) so it can be tested alongside the old app. Configure a persistent signing key before distributing updates broadly. The Windows installer is unsigned.
+
+Flutter is pinned to **3.47.7** and direct mobile dependencies use exact versions. Android requires API 24 (Android 7) or newer and targets API 36. Per [Android's local network documentation](https://developer.android.com/privacy-and-security/local-network-permission), target API 36 uses the INTERNET permission for LAN access even on Android 17. Before raising the target to 37, implement the new local-network runtime permission flow. The Android JS build uses the committed npm lockfile. GitHub uploads the resolved `pubspec.lock` and generated Gradle configuration as `HotDrop-Android-diagnostics`; commit that lockfile after a successful build to also freeze transitive Flutter dependencies. Local registry DNS is unavailable, so no Flutter lockfile has been fabricated.
 
 ## Local development (optional)
 
@@ -31,7 +33,7 @@ npm run dev:desktop
 
 Use `npm run dev:electron --workspace=apps/desktop` for the desktop window and `npm run build:desktop` for the Windows installer. The old Node 18/pkg packaging route is not used; the Electron installer remains the desktop deliverable.
 
-For a local Flutter SDK, generate Android in `apps/mobile` with `flutter create --platforms=android --org com.hotdrop --project-name hotdrop_mobile .`, then run `node scripts/prepare-mobile.cjs` from this root after building the web UI. Run `flutter pub get`, `flutter analyze lib test`, `flutter test test/host_server_test.dart`, and `flutter build apk --release` from `apps/mobile`.
+For a local Flutter 3.47.7 SDK, generate Android in `apps/mobile` with `flutter create --no-pub --platforms=android --org com.hotdrop --project-name hotdrop_mobile .`, then run `node scripts/prepare-mobile.cjs` from this root after building the web UI. Run `flutter pub get`, `flutter analyze lib test`, `flutter test`, and `flutter build apk --release --no-pub` from `apps/mobile`.
 
 ## Boundaries and validation
 
@@ -42,7 +44,7 @@ For a local Flutter SDK, generate Android in `apps/mobile` with `flutter create 
 - Sharing a URL is offline. Opening an external website requires internet access.
 - No accounts or pairing: people with access to the network URL can read and upload shared content. Do not host on an untrusted network.
 
-Local verification: clipboard fallback tests pass, JavaScript server/shell syntax checks pass. Web TypeScript checking reports zero diagnostics when resolving against the cached original type packages. Full web build and desktop integration tests are blocked by incomplete existing dependencies and registry DNS failure. Flutter/Dart/Android SDK are absent locally. GitHub analysis/tests/builds and real Android-to-browser/desktop transfers are required before calling this release verified.
+Local verification (2026-10-23): the full web production build passes, and all five clipboard/Android preparation tests pass. The Android smoke script passes JavaScript syntax checking. The desktop integration test cannot connect to the local server because this execution environment returns EACCES for loopback connections. Flutter/Dart/Android SDK are absent locally, and external downloads fail DNS resolution. The new Flutter tests and emulator job have not run locally. GitHub analysis/tests/builds, the installed-APK smoke test, and real Android-to-browser/desktop transfers are required before calling this release verified.
 
 ## Phone test checklist
 
@@ -52,6 +54,3 @@ Local verification: clipboard fallback tests pass, JavaScript server/shell synta
 4. Send a long text and URL from each side. Expand/collapse and copy the full content; confirm `✓ Copied` resets after two seconds.
 5. Switch networks, rotate/resume the app, disconnect/reconnect guests, and check address/feed recovery.
 6. Install the Windows build and confirm auto-start, tray actions, downloads, copy, and dark mode match the original.
-
-# hotdrop
-# hotdrop
