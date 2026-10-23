@@ -1,0 +1,8 @@
+node_modules/
+dist/
+dist-installers/
+.dart_tool/
+build/
+apps/mobile/android/
+apps/mobile/.metadata
+apps/mobile/.flutter-plugins-dependencies

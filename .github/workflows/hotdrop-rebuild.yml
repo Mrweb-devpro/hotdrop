@@ -1,0 +1,75 @@
+name: HotDrop rebuilt apps
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'New HotDrop Apps/**'
+      - '.github/workflows/hotdrop-rebuild.yml'
+  pull_request:
+    paths:
+      - 'New HotDrop Apps/**'
+      - '.github/workflows/hotdrop-rebuild.yml'
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: New HotDrop Apps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install JS dependencies
+        run: npm install --ignore-scripts
+      - run: npm run build:web
+      - run: npm test
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Generate Android scaffold
+        working-directory: New HotDrop Apps/apps/mobile
+        run: flutter create --platforms=android --org com.hotdrop --project-name hotdrop_mobile .
+      - run: node scripts/prepare-mobile.cjs
+      - name: Analyze and test Android host
+        working-directory: New HotDrop Apps/apps/mobile
+        run: |
+          flutter pub get
+          flutter analyze lib test
+          flutter test test/host_server_test.dart
+      - name: Build installable test APK
+        working-directory: New HotDrop Apps/apps/mobile
+        run: flutter build apk --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HotDrop-Android-test
+          path: New HotDrop Apps/apps/mobile/build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: New HotDrop Apps
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install
+      - run: npm test
+      - run: npm run build:desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: HotDrop-Windows
+          path: New HotDrop Apps/dist-installers/HotDrop-Setup-*.exe
+          if-no-files-found: error

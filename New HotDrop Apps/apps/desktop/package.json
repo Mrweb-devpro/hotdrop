@@ -1,0 +1,61 @@
+{
+  "name": "@hotdrop/desktop",
+  "version": "0.2.0",
+  "private": true,
+  "main": "electron/main.js",
+  "bin": "server/index.cjs",
+  "scripts": {
+    "dev": "node server/index.cjs",
+    "dev:electron": "electron electron/main.js",
+    "build": "npm run build:electron",
+    "build:electron": "npm --prefix ../web-client run build && electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.hotdrop.app",
+    "productName": "HotDrop",
+    "artifactName": "HotDrop-Setup-${version}.${ext}",
+    "directories": {
+      "buildResources": "electron",
+      "output": "../../dist-installers"
+    },
+    "files": [
+      "electron/**/*",
+      "server/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../web-client/dist",
+        "to": "web-client-dist",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "electron/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^5.0.1",
+    "@types/multer": "^1.4.12",
+    "@types/node": "^22.12.0",
+    "electron": "44.1.0",
+    "electron-builder": "^26.15.3",
+    "typescript": "^5.7.3"
+  }
+}
