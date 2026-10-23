@@ -31,6 +31,9 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          # The legacy "tools" package is no longer published by Google.
+          packages: 'platform-tools'
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
