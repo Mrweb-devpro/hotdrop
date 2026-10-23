@@ -4,6 +4,13 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hotdrop_mobile/host_server.dart';
 
+class _TestHostServer extends HostServer {
+  _TestHostServer(super.directory, super.loadAsset);
+
+  @override
+  Future<List<String>> addresses() async => ['192.168.43.1', '192.168.1.2'];
+}
+
 void main() {
   late Directory temp;
   late HostServer host;
@@ -11,12 +18,25 @@ void main() {
   late String base;
   setUp(() async {
     temp = await Directory.systemTemp.createTemp('hotdrop-test-');
-    host = HostServer(temp, (_) async => Uint8List.fromList(utf8.encode('<h1>HotDrop</h1>')));
+    host = _TestHostServer(temp, (_) async => Uint8List.fromList(utf8.encode('<h1>HotDrop</h1>')));
     await host.start(port: 0);
     base = 'http://127.0.0.1:${host.port}';
     client = HttpClient();
   });
   tearDown(() async { client.close(force: true); await host.stop(); await temp.delete(recursive: true); });
+
+  test('info advertises a known host address and rejects arbitrary host headers', () async {
+    for (final requested in ['192.168.1.2', 'untrusted.example', '127.0.0.1']) {
+      final request = await client.getUrl(Uri.parse('$base/api/info'));
+      request.headers.set(HttpHeaders.hostHeader, '$requested:${host.port}');
+      final response = await request.close();
+      expect(response.statusCode, 200);
+      final body = jsonDecode(await utf8.decoder.bind(response).join());
+      expect(body['ip'], requested == '192.168.1.2' ? requested : '192.168.43.1');
+      expect(body['port'], host.port);
+      expect(body['realtime'], 'polling');
+    }
+  });
 
   test('starts, serves bundled UI, and can restart', () async {
     final response = await (await client.getUrl(Uri.parse('$base/'))).close();

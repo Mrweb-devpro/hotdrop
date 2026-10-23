@@ -133,8 +133,12 @@ class HostServer {
       final path = request.uri.path;
       if (request.method == 'GET' && path == '/api/info') {
         final ips = await addresses();
-        final reached = request.connectionInfo?.localAddress;
-        await _json(request, {'ip': reached != null && !reached.isLoopback ? reached.address : (ips.isEmpty ? '127.0.0.1' : ips.first),
+        final requestedHost = request.requestedUri.host;
+        // Only advertise an address that belongs to this host.
+        final advertisedIp = ips.contains(requestedHost)
+            ? requestedHost
+            : (ips.isEmpty ? '127.0.0.1' : ips.first);
+        await _json(request, {'ip': advertisedIp,
           'addresses': ips, 'port': port, 'hostName': 'HotDrop Mobile Host', 'realtime': 'polling'});
       } else if (request.method == 'GET' && path == '/api/files') {
         await _json(request, {'files': files});
