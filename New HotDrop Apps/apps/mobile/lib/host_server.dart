@@ -122,18 +122,16 @@ class HostServer {
     var published = false;
     var from = Map<String, dynamic>.of(unknown);
     final eofMarker = _id();
-    Stream<List<int>> framedBody() async* {
-      try {
-        yield* request;
-      } on IOException {
-        // Finish any open part so its writer can close and roll back below.
-      }
-      // A complete form ignores the epilogue. If the closing delimiter was
-      // missing, this becomes a final part and releases the pending part reader.
-      yield ascii.encode('\r\n--$boundary\r\nX-HotDrop-EOF: $eofMarker\r\n\r\n\r\n--$boundary--\r\n');
-    }
+    // Forward data and cancellation directly to the request subscription. A
+    // parser that sees the closing delimiter can cancel before HTTP EOF.
+    final framedBody = request.transform(StreamTransformer<List<int>, List<int>>.fromHandlers(
+      handleDone: (sink) {
+        sink.add(ascii.encode('\r\n--$boundary\r\nX-HotDrop-EOF: $eofMarker\r\n\r\n\r\n--$boundary--\r\n'));
+        sink.close();
+      },
+    ));
     try {
-      await for (final part in MimeMultipartTransformer(boundary).bind(framedBody())) {
+      await for (final part in MimeMultipartTransformer(boundary).bind(framedBody)) {
         if (part.headers['x-hotdrop-eof'] == eofMarker) {
           await part.drain<void>();
           throw const FormatException('Incomplete multipart upload');
