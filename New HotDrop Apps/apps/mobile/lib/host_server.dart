@@ -121,8 +121,23 @@ class HostServer {
     final created = <File>[];
     var published = false;
     var from = Map<String, dynamic>.of(unknown);
+    final eofMarker = _id();
+    Stream<List<int>> framedBody() async* {
+      try {
+        yield* request;
+      } on IOException {
+        // Finish any open part so its writer can close and roll back below.
+      }
+      // A complete form ignores the epilogue. If the closing delimiter was
+      // missing, this becomes a final part and releases the pending part reader.
+      yield ascii.encode('\r\n--$boundary\r\nX-HotDrop-EOF: $eofMarker\r\n\r\n\r\n--$boundary--\r\n');
+    }
     try {
-      await for (final part in MimeMultipartTransformer(boundary).bind(request)) {
+      await for (final part in MimeMultipartTransformer(boundary).bind(framedBody())) {
+        if (part.headers['x-hotdrop-eof'] == eofMarker) {
+          await part.drain<void>();
+          throw const FormatException('Incomplete multipart upload');
+        }
         final disposition = HeaderValue.parse(part.headers['content-disposition'] ?? '');
         final field = disposition.parameters['name'];
         final filename = disposition.parameters['filename'];

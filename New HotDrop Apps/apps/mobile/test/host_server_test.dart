@@ -142,7 +142,7 @@ void main() {
     request.headers.set('Content-Type', 'multipart/form-data; boundary=unfinished');
     request.add(utf8.encode('--unfinished\r\nContent-Disposition: form-data; name="files"; filename="partial.bin"\r\n\r\npartial'));
     final response = await request.close();
-    expect(response.statusCode, greaterThanOrEqualTo(400));
+    expect(response.statusCode, 400);
     await response.drain<void>();
     expect(host.files, isEmpty);
     expect(await temp.list().toList(), isEmpty);
@@ -152,7 +152,8 @@ void main() {
   test('text limit does not split an emoji into invalid Unicode', () async {
     final request = await client.postUrl(Uri.parse('$base/api/text'));
     final expected = '${List.filled(4999, 'x').join()}\u{1f642}';
-    request.write(jsonEncode({'text': '${expected}extra', 'from': {'id': 'test'}}));
+    request.headers.contentType = ContentType.json;
+    request.add(utf8.encode(jsonEncode({'text': '${expected}extra', 'from': {'id': 'test'}})));
     final response = await request.close();
     expect(response.statusCode, 200);
     final body = jsonDecode(await utf8.decoder.bind(response).join());
